@@ -8,6 +8,12 @@ This repository contains a complete experimental framework for real-time phoneme
 3. Implementation 3 — Real-Time, Buffered & Jitter-Smoothed (stable, smoothed output)
 
 An end-to-end experiment runner executes all stages, records audio, builds ground truth, and generates a comparative analysis.
+------------------------------------------------------------
+AUTHORS
+------------------------------------------------------------
+
+Jason Stuckless  
+Juliano Falotico
 
 ------------------------------------------------------------
 FEATURES
