@@ -4,6 +4,7 @@ import json
 import numpy as np
 import soundfile as sf
 from pathlib import Path
+from collections import Counter
 from components import (
     PhonemeRecognizer,
     IPAToARPAbetConverter,
@@ -12,10 +13,23 @@ from components import (
 
 
 class Implementation1:
-    """Baseline ground truth - offline phoneme recognition from audio file"""
+    """
+    Baseline ground truth - offline phoneme recognition with overlapping windows
     
-    def __init__(self, sample_rate=16000):
+    Uses overlapping analysis to create a superior baseline compared to real-time processing:
+    - 50% overlapping windows for redundancy
+    - Consensus voting when phonemes appear in multiple windows
+    - No real-time constraints
+    - Processes all audio including silence
+    """
+    
+    def __init__(self, sample_rate=16000, chunk_duration_ms=500, overlap_percent=50, silence_threshold=0.005):
         self.sample_rate = sample_rate
+        self.chunk_duration_ms = chunk_duration_ms
+        self.chunk_size = int(sample_rate * chunk_duration_ms / 1000)
+        self.overlap_percent = overlap_percent
+        self.hop_size = int(self.chunk_size * (1 - overlap_percent / 100))
+        self.silence_threshold = silence_threshold
         
         # Initialize components
         self.recognizer = PhonemeRecognizer()
@@ -23,10 +37,13 @@ class Implementation1:
         self.mapper = PhonemeToVisemeMapper()
         
         # Storage for results
-        self.phoneme_sequence = []
         self.results = []
+        self.detection_map = {}  # Maps time positions to detected phonemes
         
-        logging.info("Implementation 1 initialized (baseline ground truth)")
+        logging.info(f"Implementation 1 initialized (overlapping windows baseline)")
+        logging.info(f"  Chunk size: {chunk_duration_ms}ms")
+        logging.info(f"  Overlap: {overlap_percent}%")
+        logging.info(f"  Hop size: {self.hop_size} samples ({self.hop_size/sample_rate*1000:.1f}ms)")
     
     def load_audio(self, audio_file_path):
         """Load audio from WAV file"""
@@ -52,12 +69,102 @@ class Implementation1:
             logging.error(f"Failed to load audio file: {e}")
             return None
     
+    def process_chunk(self, chunk, chunk_start_time):
+        """Process a single chunk and return detected phonemes with positions"""
+        energy = float(np.abs(chunk).mean())
+        
+        # Still detect energy, but process anyway (we'll filter later if needed)
+        is_silence = energy < self.silence_threshold
+        
+        # Recognize phonemes in this chunk
+        try:
+            ipa_phonemes = self.recognizer.recognize(chunk)
+        except TypeError:
+            ipa_phonemes = self.recognizer.recognize(chunk, self.sample_rate)
+        
+        results = []
+        for ipa_phoneme in ipa_phonemes:
+            # Handle multi-character sequences
+            if len(ipa_phoneme) > 1:
+                segments = self.ipa_converter.segment_ipa_string(ipa_phoneme)
+                if len(segments) > 1:
+                    for segment in segments:
+                        arpabet = self.ipa_converter.convert(segment)
+                        if arpabet and arpabet != '' and arpabet != 'SIL':
+                            results.append({
+                                'ipa': segment,
+                                'arpabet': arpabet,
+                                'time': chunk_start_time,
+                                'energy': energy,
+                                'is_silence': is_silence
+                            })
+                    continue
+            
+            # Normal single phoneme
+            arpabet = self.ipa_converter.convert(ipa_phoneme)
+            if arpabet and arpabet != '' and arpabet != 'SIL':
+                results.append({
+                    'ipa': ipa_phoneme,
+                    'arpabet': arpabet,
+                    'time': chunk_start_time,
+                    'energy': energy,
+                    'is_silence': is_silence
+                })
+        
+        return results
+    
+    def merge_overlapping_detections(self, time_bin_ms=50):
+        """
+        Merge phoneme detections from overlapping windows using consensus
+        
+        Args:
+            time_bin_ms: Time resolution for binning detections (ms)
+        """
+        if not self.detection_map:
+            return []
+        
+        # Group detections by time bins
+        time_bin_sec = time_bin_ms / 1000.0
+        binned = {}
+        
+        for time_pos, phonemes in self.detection_map.items():
+            bin_index = int(time_pos / time_bin_sec)
+            if bin_index not in binned:
+                binned[bin_index] = []
+            binned[bin_index].extend(phonemes)
+        
+        # For each time bin, find consensus phoneme
+        merged = []
+        for bin_index in sorted(binned.keys()):
+            phonemes = binned[bin_index]
+            
+            # Count occurrences
+            arpabet_votes = Counter(p['arpabet'] for p in phonemes)
+            most_common_arpabet, votes = arpabet_votes.most_common(1)[0]
+            
+            # Get a representative detection (prefer higher energy)
+            representatives = [p for p in phonemes if p['arpabet'] == most_common_arpabet]
+            best = max(representatives, key=lambda p: p['energy'])
+            
+            merged.append({
+                'arpabet': most_common_arpabet,
+                'ipa': best['ipa'],
+                'time': bin_index * time_bin_sec,
+                'energy': best['energy'],
+                'confidence': votes / len(phonemes),  # What % of windows agreed
+                'vote_count': votes,
+                'total_detections': len(phonemes)
+            })
+        
+        logging.info(f"Merged {len(self.detection_map)} raw detections into {len(merged)} consensus phonemes")
+        return merged
+    
     def analyze_offline(self, audio_file_path):
         """
-        Analyze audio file offline to establish ground truth phoneme sequence
+        Analyze audio file offline with overlapping windows to establish ground truth
         """
         logging.info("=" * 60)
-        logging.info("IMPLEMENTATION 1: Offline Analysis (Baseline Ground Truth)")
+        logging.info("IMPLEMENTATION 1: Offline Analysis (Overlapping Windows)")
         logging.info("=" * 60)
         
         # Load audio from file
@@ -66,63 +173,71 @@ class Implementation1:
             logging.error("Failed to load audio file")
             return None
         
-        # Recognize phonemes
-        logging.info("Recognizing phonemes...")
+        # Process audio with overlapping windows
+        logging.info(f"Processing with {self.overlap_percent}% overlap...")
+        logging.info(f"Window size: {self.chunk_duration_ms}ms, Hop: {self.hop_size/self.sample_rate*1000:.1f}ms")
+        
+        total_windows = int(np.ceil((len(audio_data) - self.chunk_size) / self.hop_size)) + 1
+        logging.info(f"Total windows to process: {total_windows}")
+        
+        window_count = 0
+        total_detections = 0
+        
         start_time = time.time()
-        ipa_phonemes = self.recognizer.recognize(audio_data, self.sample_rate)
+        
+        # Sliding window analysis
+        for i in range(0, len(audio_data) - self.chunk_size + 1, self.hop_size):
+            chunk = audio_data[i:i + self.chunk_size]
+            window_start_time = i / self.sample_rate
+            
+            # Process this window
+            detections = self.process_chunk(chunk, window_start_time)
+            
+            # Add to detection map
+            for det in detections:
+                time_key = det['time']
+                if time_key not in self.detection_map:
+                    self.detection_map[time_key] = []
+                self.detection_map[time_key].append(det)
+                total_detections += 1
+            
+            window_count += 1
+            
+            if window_count % 100 == 0:
+                logging.info(f"Processed {window_count}/{total_windows} windows...")
+        
         recognition_time = time.time() - start_time
         
         logging.info(f"Recognition completed in {recognition_time:.2f}s")
-        logging.info(f"Found {len(ipa_phonemes)} IPA phonemes")
+        logging.info(f"Processed {window_count} overlapping windows")
+        logging.info(f"Total raw detections: {total_detections}")
         
-        # Convert to ARPAbet and map to visemes
-        for ipa_phoneme in ipa_phonemes:
-            # Handle multi-character sequences
-            if len(ipa_phoneme) > 1:
-                segments = self.ipa_converter.segment_ipa_string(ipa_phoneme)
-                if len(segments) > 1:
-                    for segment in segments:
-                        arpabet = self.ipa_converter.convert(segment)
-                        if arpabet and arpabet != '':
-                            self.phoneme_sequence.append({
-                                'ipa': segment,
-                                'arpabet': arpabet,
-                                'viseme': self.mapper.phoneme_to_viseme(arpabet)
-                            })
-                    continue
+        # Merge overlapping detections using consensus
+        logging.info("Merging overlapping detections...")
+        merged = self.merge_overlapping_detections(time_bin_ms=50)
+        
+        # Convert to final results format
+        for idx, phoneme_data in enumerate(merged):
+            viseme = self.mapper.phoneme_to_viseme(phoneme_data['arpabet'])
             
-            # Normal single phoneme
-            arpabet = self.ipa_converter.convert(ipa_phoneme)
-            if arpabet and arpabet != '':
-                self.phoneme_sequence.append({
-                    'ipa': ipa_phoneme,
-                    'arpabet': arpabet,
-                    'viseme': self.mapper.phoneme_to_viseme(arpabet)
-                })
-        
-        logging.info(f"Converted to {len(self.phoneme_sequence)} ARPAbet phonemes")
-        
-        # Record actual timing (baseline ground truth - NO artificial spacing)
-        logging.info("Recording baseline phoneme sequence with actual detection timing...")
-        current_time = 0.0
-        
-        for idx, phoneme_data in enumerate(self.phoneme_sequence):
-            # Store result with actual detection time
             result = {
                 'index': idx,
                 'ipa_phoneme': phoneme_data['ipa'],
                 'arpabet_phoneme': phoneme_data['arpabet'],
-                'viseme': phoneme_data['viseme'],
-                'recognition_time': current_time,
-                'display_time': current_time
+                'viseme': viseme,
+                'recognition_time': phoneme_data['time'],
+                'display_time': phoneme_data['time'],
+                'energy': phoneme_data['energy'],
+                'confidence': phoneme_data['confidence'],
+                'vote_count': phoneme_data['vote_count'],
+                'total_detections': phoneme_data['total_detections']
             }
             self.results.append(result)
-            
-            # Minimal increment for offline batch processing
-            current_time += 0.001
         
-        logging.info(f"Baseline analysis complete: {len(self.results)} phonemes recorded")
-        return self.phoneme_sequence
+        logging.info(f"Final ground truth: {len(self.results)} phonemes")
+        logging.info(f"Average confidence: {np.mean([r['confidence'] for r in self.results]):.2%}")
+        
+        return self.results
     
     def get_results(self):
         """Get results for analysis"""
@@ -135,11 +250,15 @@ class Implementation1:
             interval = (self.results[i]['recognition_time'] - self.results[i-1]['recognition_time']) * 1000
             intervals.append(interval)
         
+        confidences = [r['confidence'] for r in self.results]
+        
         stats = {
-            'configuration': 'Implementation 1: Baseline (Offline Recognition)',
+            'configuration': 'Implementation 1: Ground Truth (Overlapping Windows)',
             'phonemes_displayed': len(self.results),
             'mean_interval_ms': float(np.mean(intervals)) if intervals else 0,
             'std_interval_ms': float(np.std(intervals)) if intervals else 0,
+            'mean_confidence': float(np.mean(confidences)),
+            'min_confidence': float(np.min(confidences)),
             'phoneme_sequence': self.results
         }
         
