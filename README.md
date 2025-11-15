@@ -39,7 +39,7 @@ PROJECT STRUCTURE
     ├── implementation3.py           # Real-time system (buffered & smoothed)
     ├── analyze_results.py           # Accuracy/timing/UI-latency analysis
     ├── run_experiment.py            # Full pipeline controller
-    ├── viseme_sprites/              # Viseme PNG/JPG sprites or placeholders
+    ├── viseme_sprites/              # Viseme PNG/JPG sprites
     └── README.md
 
 ------------------------------------------------------------
