@@ -96,7 +96,7 @@ Place viseme images here:
         labiodental.png
         ...
 
-Missing sprites are auto-generated as placeholders.
+Missing sprites are auto-generated as placeholders though this should not need to occur since all are provided in the corresponding folder.
 
 ------------------------------------------------------------
 CONFIGURATION
