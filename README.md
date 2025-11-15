@@ -1,5 +1,4 @@
 # End-to-End Real-Time Phoneme-to-Viseme System
-# (E2E-P2V)
 ### Offline Ground Truth • Real-Time Capture • Buffered/Jitter-Smoothed Pipeline • Comparative Evaluation
 
 This repository contains a complete experimental framework for real-time phoneme recognition and viseme animation, including:
