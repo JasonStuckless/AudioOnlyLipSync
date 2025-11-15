@@ -1,0 +1,10 @@
+torch
+transformers
+numpy
+opencv-python
+sounddevice
+soundfile
+scipy
+matplotlib
+pandas
+tqdm
